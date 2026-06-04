@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Lance le routeur en ligne de commande.
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+if ! python3 -c "import numpy" 2>/dev/null; then
+  echo "Installation des dépendances…"
+  python3 -m pip install -r requirements.txt
+fi
+
+exec python3 cli.py "$@"

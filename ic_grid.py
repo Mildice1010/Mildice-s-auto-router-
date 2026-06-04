@@ -8,18 +8,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.widgets import Button, TextBox
 
+from layout import (
+    DEFAULT_COPPER_LAYERS,
+    GRID_SIZE,
+    MAX_COPPER_LAYERS,
+    MIN_CELL_GAP,
+    MIN_COPPER_LAYERS,
+    N_COMPONENTS,
+    N_PINS,
+    pin_corner_offsets,
+    random_connection_table,
+    random_ic_cells,
+)
 from pathfinder import Connection, RouteFrame, route_connections_iter
 
-GRID_SIZE = 12
-DEFAULT_COPPER_LAYERS = 2
-MIN_COPPER_LAYERS = 1
-MAX_COPPER_LAYERS = 32
-N_COMPONENTS = 4
-N_PINS = 4
-PIN_HALF = 0.18
-MIN_CELL_GAP = 2
-MIN_CONNECTIONS = 5
-MAX_CONNECTIONS = 10
 ROUTE_TIMER_MS = 35
 
 LAYER_TRACE_COLORS = [
@@ -35,63 +37,6 @@ LAYER_TRACE_COLORS = [
 CONN_COLORS = ["#c0392b", "#2980b9", "#27ae60", "#8e44ad", "#e67e22", "#1abc9c"]
 
 
-def pin_offsets(half: float = PIN_HALF) -> np.ndarray:
-    """Quatre broches aux coins d'un petit carré (P1…P4)."""
-    return np.array([
-        [-half, -half],
-        [half, -half],
-        [half, half],
-        [-half, half],
-    ])
-
-
-def random_centers(
-    n: int,
-    grid_size: int,
-    min_gap: int,
-    rng: random.Random,
-) -> list[tuple[int, int]]:
-    """Positions entières sur la grille, sans centres trop proches."""
-    margin = 2
-    candidates = [
-        (x, y)
-        for x in range(margin, grid_size - margin)
-        for y in range(margin, grid_size - margin)
-    ]
-    rng.shuffle(candidates)
-    chosen: list[tuple[int, int]] = []
-    for cell in candidates:
-        if all(abs(cell[0] - c[0]) >= min_gap and abs(cell[1] - c[1]) >= min_gap for c in chosen):
-            chosen.append(cell)
-        if len(chosen) == n:
-            break
-    if len(chosen) < n:
-        raise RuntimeError(
-            "Impossible de placer tous les composants — augmentez GRID_SIZE ou réduisez MIN_CELL_GAP."
-        )
-    return chosen
-
-
-def random_connection_table(rng: random.Random) -> List[Connection]:
-    """Génère des paires de broches à relier entre CI distincts."""
-    n_links = rng.randint(MIN_CONNECTIONS, MAX_CONNECTIONS)
-    seen: set[tuple[tuple[int, int], tuple[int, int]]] = set()
-    connections: List[Connection] = []
-
-    while len(connections) < n_links:
-        ic_a = rng.randrange(1, N_COMPONENTS + 1)
-        ic_b = rng.randrange(1, N_COMPONENTS + 1)
-        if ic_a == ic_b:
-            continue
-        pin_a = rng.randrange(1, N_PINS + 1)
-        pin_b = rng.randrange(1, N_PINS + 1)
-        key = tuple(sorted(((ic_a, pin_a), (ic_b, pin_b))))
-        if key in seen:
-            continue
-        seen.add(key)
-        connections.append(Connection(ic_a, pin_a, ic_b, pin_b))
-
-    return connections
 
 
 def parse_copper_layers(text: str) -> Optional[int]:
@@ -104,21 +49,20 @@ def parse_copper_layers(text: str) -> Optional[int]:
     return None
 
 
-def format_connection_table(
-    connections: List[Connection],
-    copper_layers: int,
-    route_status: str = "",
-) -> str:
+def format_connection_header(copper_layers: int, can_select: bool) -> str:
     header = (
         f"Couches de cuivre : {copper_layers}\n"
         "Table de connexions\n"
         + "─" * 22
     )
-    rows = [f"CI{c.ic_a}-P{c.pin_a}  ↔  CI{c.ic_b}-P{c.pin_b}" for c in connections]
-    text = header + "\n" + "\n".join(rows)
-    if route_status:
-        text += "\n\n" + route_status
-    return text
+    if can_select:
+        header += "\n(clic sur une ligne)"
+    return header
+
+
+def format_connection_row(conn: Connection, selected: bool) -> str:
+    label = f"CI{conn.ic_a}-P{conn.pin_a}  ↔  CI{conn.ic_b}-P{conn.pin_b}"
+    return f"▶ {label}" if selected else f"  {label}"
 
 
 def pin_xy(center: tuple[int, int], pin: int, offsets: np.ndarray) -> tuple[float, float]:
@@ -130,8 +74,8 @@ def pin_xy(center: tuple[int, int], pin: int, offsets: np.ndarray) -> tuple[floa
 def main() -> None:
     rng = random.Random()
     colors = CONN_COLORS[:N_COMPONENTS]
-    centers = random_centers(N_COMPONENTS, GRID_SIZE, MIN_CELL_GAP, rng)
-    offsets = pin_offsets()
+    ic_cells = random_ic_cells(N_COMPONENTS, GRID_SIZE, MIN_CELL_GAP, rng)
+    offsets = pin_corner_offsets()
 
     fig = plt.figure(figsize=(11, 8))
     fig.subplots_adjust(left=0.06, right=0.96, top=0.92, bottom=0.16, wspace=0.28)
@@ -152,8 +96,21 @@ def main() -> None:
     ax_grid.grid(True, which="both", linestyle="-", linewidth=0.6, color="#888888", alpha=0.7)
     ax_grid.set_facecolor("#f8f8f8")
 
-    for i, (cx, cy) in enumerate(centers):
+    for i, (cx, cy) in enumerate(ic_cells):
         pins = offsets + np.array([cx, cy])
+        ax_grid.add_patch(
+            plt.Rectangle(
+                (cx, cy),
+                1,
+                1,
+                fill=True,
+                facecolor=colors[i],
+                alpha=0.12,
+                edgecolor=colors[i],
+                linewidth=1.2,
+                zorder=3,
+            )
+        )
         ax_grid.scatter(
             pins[:, 0],
             pins[:, 1],
@@ -164,7 +121,6 @@ def main() -> None:
             zorder=5,
             label=f"CI {i + 1}",
         )
-        ax_grid.scatter(cx, cy, s=30, c=colors[i], alpha=0.35, zorder=4)
         for pin_idx in range(N_PINS):
             px, py = pin_xy((cx, cy), pin_idx + 1, offsets)
             ax_grid.annotate(
@@ -180,7 +136,8 @@ def main() -> None:
 
     ax_table.axis("off")
     ax_table.set_facecolor("#fafafa")
-    table_text = ax_table.text(
+    TABLE_LINE_DY = 0.048
+    table_header_text = ax_table.text(
         0.05,
         0.95,
         "",
@@ -191,6 +148,18 @@ def main() -> None:
         family="monospace",
         linespacing=1.45,
     )
+    table_status_text = ax_table.text(
+        0.05,
+        0.08,
+        "",
+        transform=ax_table.transAxes,
+        va="bottom",
+        ha="left",
+        fontsize=9,
+        family="monospace",
+        color="#555555",
+    )
+    table_row_texts: list = []
 
     wire_artists: list = []
     route_artists: list = []
@@ -202,6 +171,8 @@ def main() -> None:
         "copper_layers": DEFAULT_COPPER_LAYERS,
         "route_status": "",
         "routing": False,
+        "committed_paths": [],
+        "selected_conn": None,
     }
 
     def set_title(status: str = "") -> None:
@@ -211,14 +182,43 @@ def main() -> None:
         else:
             ax_grid.set_title(base, fontsize=11)
 
+    def clear_table_rows() -> None:
+        for artist in table_row_texts:
+            artist.remove()
+        table_row_texts.clear()
+
     def refresh_table_text() -> None:
-        table_text.set_text(
-            format_connection_table(
-                ui_state["connections"],
-                ui_state["copper_layers"],
-                ui_state["route_status"],
-            )
+        connections = ui_state["connections"]
+        can_select = bool(ui_state["committed_paths"]) and not ui_state["routing"]
+        header_lines = 3 + (1 if can_select else 0)
+        table_header_text.set_text(
+            format_connection_header(ui_state["copper_layers"], can_select)
         )
+        table_status_text.set_text(ui_state["route_status"])
+        clear_table_rows()
+        y = 0.95 - header_lines * TABLE_LINE_DY
+        for idx, conn in enumerate(connections):
+            selected = idx == ui_state["selected_conn"]
+            row_style = {
+                "color": "#1a5276",
+                "weight": "bold",
+                "bbox": dict(boxstyle="round,pad=0.25", facecolor="#d6eaf8", edgecolor="#2980b9"),
+            } if selected else {"color": "#333333", "weight": "normal"}
+            row = ax_table.text(
+                0.05,
+                y,
+                format_connection_row(conn, selected),
+                transform=ax_table.transAxes,
+                va="top",
+                ha="left",
+                fontsize=10,
+                family="monospace",
+                picker=5 if can_select else False,
+                **row_style,
+            )
+            row._conn_index = idx  # type: ignore[attr-defined]
+            table_row_texts.append(row)
+            y -= TABLE_LINE_DY
 
     def clear_wires() -> None:
         for artist in wire_artists:
@@ -234,8 +234,8 @@ def main() -> None:
         clear_wires()
         for conn in connections:
             ic_a, ic_b = conn.ic_a - 1, conn.ic_b - 1
-            x1, y1 = pin_xy(centers[ic_a], conn.pin_a, offsets)
-            x2, y2 = pin_xy(centers[ic_b], conn.pin_b, offsets)
+            x1, y1 = pin_xy(ic_cells[ic_a], conn.pin_a, offsets)
+            x2, y2 = pin_xy(ic_cells[ic_b], conn.pin_b, offsets)
             (line,) = ax_grid.plot(
                 [x1, x2],
                 [y1, y2],
@@ -247,33 +247,68 @@ def main() -> None:
             )
             wire_artists.append(line)
 
-    def draw_committed_paths(committed: list) -> None:
-        for poly, layer, conn_idx in committed:
+    def draw_committed_paths(committed: list, highlight_idx: Optional[int] = None) -> None:
+        has_highlight = highlight_idx is not None and any(
+            entry[2] == highlight_idx for entry in committed
+        )
+        for entry in committed:
+            poly, layer, conn_idx = entry[0], entry[1], entry[2]
+            vias = entry[3] if len(entry) > 3 else []
             if len(poly) < 2:
                 continue
             xs = [p[0] for p in poly]
             ys = [p[1] for p in poly]
             color = LAYER_TRACE_COLORS[layer % len(LAYER_TRACE_COLORS)]
+            highlighted = has_highlight and conn_idx == highlight_idx
+            dimmed = has_highlight and not highlighted
             (line,) = ax_grid.plot(
                 xs,
                 ys,
                 color=color,
-                linewidth=2.4,
-                alpha=0.9,
-                zorder=3,
+                linewidth=4.2 if highlighted else 2.4,
+                alpha=1.0 if highlighted else (0.22 if dimmed else 0.9),
+                zorder=5 if highlighted else 3,
                 solid_capstyle="round",
             )
             route_artists.append(line)
-            route_artists.append(
-                ax_grid.text(
-                    poly[-1][0],
-                    poly[-1][1],
-                    f"L{layer + 1}",
-                    fontsize=7,
-                    color=color,
-                    zorder=4,
+            if vias and not dimmed:
+                vx, vy = zip(*vias)
+                route_artists.append(
+                    ax_grid.scatter(
+                        vx,
+                        vy,
+                        s=55,
+                        marker="D",
+                        c="#f1c40f",
+                        edgecolors="#b7950b",
+                        linewidths=0.8,
+                        zorder=6,
+                    )
                 )
-            )
+            if not dimmed:
+                route_artists.append(
+                    ax_grid.text(
+                        poly[-1][0],
+                        poly[-1][1],
+                        f"L{layer + 1}",
+                        fontsize=7 if not highlighted else 8,
+                        color=color,
+                        weight="bold" if highlighted else "normal",
+                        zorder=6 if highlighted else 4,
+                    )
+                )
+            if highlighted:
+                route_artists.append(
+                    ax_grid.scatter(
+                        [xs[0], xs[-1]],
+                        [ys[0], ys[-1]],
+                        s=140,
+                        facecolors="none",
+                        edgecolors=color,
+                        linewidths=2.5,
+                        zorder=7,
+                    )
+                )
 
     def render_route_frame(frame: RouteFrame) -> None:
         clear_route_artists()
@@ -321,8 +356,10 @@ def main() -> None:
             )
             route_artists.append(partial)
 
-        draw_committed_paths(frame.committed)
+        draw_committed_paths(frame.committed, ui_state["selected_conn"])
         ui_state["route_status"] = frame.status
+        if frame.phase == "done":
+            ui_state["committed_paths"] = list(frame.committed)
         refresh_table_text()
         set_title(frame.status)
 
@@ -360,6 +397,8 @@ def main() -> None:
         stop_routing()
         clear_route_artists()
         clear_wires()
+        ui_state["committed_paths"] = []
+        ui_state["selected_conn"] = None
         ui_state["route_status"] = "Routage en cours…"
         ui_state["routing"] = True
         btn_route.label.set_text("Routage…")
@@ -369,7 +408,7 @@ def main() -> None:
 
         route_gen = route_connections_iter(
             ui_state["connections"],
-            centers,
+            ic_cells,
             offsets,
             GRID_SIZE,
             ui_state["copper_layers"],
@@ -379,11 +418,35 @@ def main() -> None:
         route_timer.start()
         route_step()
 
+    def redraw_committed_routes() -> None:
+        clear_route_artists()
+        if ui_state["committed_paths"]:
+            draw_committed_paths(
+                ui_state["committed_paths"],
+                ui_state["selected_conn"],
+            )
+
+    def on_connection_pick(event) -> None:
+        if ui_state["routing"] or not ui_state["committed_paths"]:
+            return
+        artist = event.artist
+        if artist not in table_row_texts:
+            return
+        idx = getattr(artist, "_conn_index", None)
+        if idx is None:
+            return
+        ui_state["selected_conn"] = None if ui_state["selected_conn"] == idx else idx
+        refresh_table_text()
+        redraw_committed_routes()
+        fig.canvas.draw_idle()
+
     def apply_connections(_event=None) -> None:
         stop_routing()
         clear_route_artists()
         ui_state["connections"] = random_connection_table(rng)
         ui_state["route_status"] = ""
+        ui_state["committed_paths"] = []
+        ui_state["selected_conn"] = None
         refresh_table_text()
         draw_direct_wires(ui_state["connections"])
         set_title()
@@ -414,6 +477,8 @@ def main() -> None:
 
     btn_route = Button(ax_btn_route, "Router (pathfinder)")
     btn_route.on_clicked(start_routing)
+
+    fig.canvas.mpl_connect("pick_event", on_connection_pick)
 
     set_title()
     apply_connections()
